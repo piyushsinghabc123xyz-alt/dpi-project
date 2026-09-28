@@ -41,6 +41,16 @@ const localMap = {
   '192.168.1.255': 'Subnet Broadcast',
   '224.0.0.251': 'mDNS / AirPlay'
 };
+
+// Helper function to check if an IP address is a local network address
+function isLocalNetworkIp(ip) {
+  return ip.startsWith('127.') || 
+         ip.startsWith('10.') || 
+         ip.startsWith('192.168.') || 
+         ip.startsWith('224.') || 
+         ip.startsWith('255.');
+}
+
 // packet capture loop that fires every time a raw Ethernet frame is intercepted on interface 'en0
 pcap.on('packet', (size) => {
   sessionData.totalFrames++;
@@ -51,10 +61,13 @@ pcap.on('packet', (size) => {
     const destination = res.info.dstaddr;
     const protoType = res.info.protocol;
 
+    // Skip local subnet noise so table focuses on external web traffic
+    if (isLocalNetworkIp(destination)) return;
+
     if (!sessionData.clientUsage[destination]) {
-      const tag = localMap[destination] || sessionData.knownDomains[destination] || 'Unresolved Host';
+      const tag = sessionData.knownDomains[destination] || 'Resolving Website...';
       sessionData.clientUsage[destination] = { bytes: 0, domain: tag };
-      if (!localMap[destination]) resolveHostName(destination);
+      resolveHostName(destination);
     }
     sessionData.clientUsage[destination].bytes += size;
     //check if Layer-4 protocol is TCP - protocol number 6
@@ -81,7 +94,7 @@ pcap.on('packet', (size) => {
       if (port === 53 || srcPort === 53) {
         sessionData.protocolTotals.DNS++;
         parseDnsPayload(rawBuf.slice(payloadStart, size));
-      } else if (port === 443 || srcPort === 443) { // QUIC Traffic (YouTube/HTTP-3)
+      } else if (port === 443 || srcPort === 443) {
         sessionData.protocolTotals.HTTPS++;
         parseSniHeader(rawBuf.slice(payloadStart, size), destination);
       } else {
@@ -95,7 +108,7 @@ pcap.on('packet', (size) => {
 function parseDnsPayload(buf) {
   if (buf.length < 12) return;
   const str = buf.toString('binary');
-  const matches = str.match(/([a-zA-Z0-9-]+\.)+(com|org|net|io|co|in|tv|app|dev|me|edu|gov|xyz)/gi);
+  const matches = str.match(/(?:[a-zA-Z0-9-]+\.)+(?:com|org|net|io|co|in|tv|app|dev|me|edu|gov|xyz)/gi);
   if (matches && matches.length > 0) {
     let domain = matches[0].toLowerCase();
     
@@ -122,7 +135,7 @@ function parseDnsPayload(buf) {
 // handles reverse DNS lookups in the background
 // finds the domain name associated with an IP address
 function resolveHostName(addr) {
-  if (sessionData.knownDomains[addr]) return;
+  if (sessionData.knownDomains[addr] && sessionData.knownDomains[addr] !== 'Resolving Website...') return;
   
   dns.reverse(addr).then(ptrs => {
     if (ptrs && ptrs.length > 0) {
@@ -130,8 +143,8 @@ function resolveHostName(addr) {
       const parts = hostLabel.split('.').filter(Boolean);
       if (parts.length >= 2) {
         const rootDomain = parts.slice(-2).join('.').toLowerCase();
-        if (rootDomain.includes('amazonaws.com')) hostLabel = 'AWS Infrastructure';
-        else if (rootDomain.includes('1e100.net') || rootDomain.includes('googlevideo.com')) hostLabel = 'youtube.com';
+        if (rootDomain.includes('1e100.net') || rootDomain.includes('googlevideo.com')) hostLabel = 'youtube.com';
+        else if (rootDomain.includes('amazonaws.com')) hostLabel = 'AWS Services';
         else if (rootDomain.includes('cloudfront.net')) hostLabel = 'Cloudfront CDN';
         else if (rootDomain.includes('akamaitechnologies.com')) hostLabel = 'Akamai CDN';
         else hostLabel = rootDomain;
@@ -142,8 +155,8 @@ function resolveHostName(addr) {
     }
   }).catch(() => {
     if (!sessionData.knownDomains[addr]) {
-      sessionData.knownDomains[addr] = 'Cloud Host';
-      if (sessionData.clientUsage[addr]) sessionData.clientUsage[addr].domain = 'Cloud Host';
+      sessionData.knownDomains[addr] = 'Web Endpoint';
+      if (sessionData.clientUsage[addr]) sessionData.clientUsage[addr].domain = 'Web Endpoint';
     }
   });
 }
@@ -188,9 +201,10 @@ function formatDataVolume(totalBytes) { //converts byte values into readable uni
 //collects packet stats every second and sends them to the React client through Websockets
 setInterval(() => {
   const sortedEndpoints = Object.entries(sessionData.clientUsage)
+    .filter(([ip]) => !isLocalNetworkIp(ip))
     .map(([ip, details]) => ({
       ip,
-      domain: details.domain || localMap[ip] || sessionData.knownDomains[ip] || 'Unknown',
+      domain: details.domain || sessionData.knownDomains[ip] || 'Web Endpoint',
       bytes: details.bytes,
       formattedSize: formatDataVolume(details.bytes)
     }))
@@ -222,6 +236,8 @@ app.post('/api/block-domain', async (req, res) => {
 
   if (domain.includes('youtube')) {
     queryTargets.push('googlevideo.com', 'ytimg.com', 'youtube-nocookie.com', 'm.youtube.com', 'i.ytimg.com', 'gvt1.com');
+  } else if (domain.includes('github')) {
+    queryTargets.push('github.githubassets.com', 'api.github.com', 'raw.githubusercontent.com');
   }
 
   for (const t of queryTargets) {
@@ -237,19 +253,23 @@ app.post('/api/block-domain', async (req, res) => {
 
   if (ips.length === 0) ips = [domain];
 
-  // Inject pfctl drop rules into dedicated anchor
+  // Inject pfctl drop rules into dedicated anchor for both TCP and UDP
   ips.forEach(ip => {
     exec(`echo 'block drop out proto { tcp, udp } to ${ip}' | sudo pfctl -a dpi_rules -f -`);
   });
 
-  // Enable pf firewall and flush TCP/UDP active states
+  // Enable pf firewall and terminate active kernel sockets
   exec('sudo pfctl -e');
   exec('sudo pfctl -k 0.0.0.0/0 -k 0.0.0.0/0');
   
-  // Sinkhole domain variants in /etc/hosts
+  // Sinkhole domain variants in /etc/hosts for both IPv4 and IPv6
   if (!domain.match(/^[0-9.]+$\vert{}^[0-9a-fA-F:]+$/)) {
     exec(`echo "127.0.0.1 ${domain} www.${domain} m.${domain}" | sudo tee -a /etc/hosts`);
+    exec(`echo "::1 ${domain} www.${domain} m.${domain}" | sudo tee -a /etc/hosts`);
   }
+
+  // Flush system DNS cache immediately
+  exec('sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder');
 
   sessionData.blocklist[domain] = ips;
   sessionData.logs.unshift({
@@ -271,6 +291,10 @@ app.post('/api/unblock-domain', (req, res) => {
   }
   exec('sudo pfctl -a dpi_rules -F all');
   exec(`sudo sed -i '' '/${domain}/d' /etc/hosts`);
+  
+  // Flush system DNS cache on unblock
+  exec('sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder');
+
   sessionData.logs.unshift({
     id: Date.now(),
     timestamp: new Date().toLocaleTimeString(),
