@@ -10,220 +10,196 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
-
-// --- Packet Capture Setup ---
-const cap = new Cap();
-const device = 'en0';
-const filter = 'ip or ip6';
-const bufSize = 10 * 1024 * 1024;
-const buffer = Buffer.alloc(65535);
+const srv = http.createServer(app);
+const io = new Server(srv, { cors: { origin: '*' } });
+//Create and initialize a C++ object/module that wraps libpcap and uses 
+// it to capture network packets from a network interface
+const pcap = new Cap();
+const rawBuf = Buffer.alloc(65535);
 
 try {
-  cap.open(device, filter, bufSize, buffer);
-  cap.setMinBytes && cap.setMinBytes(0);
-} catch (e) {
-  console.error("Interface open error:", e);
+  pcap.open('en0', 'ip or ip6', 10485760, rawBuf);
+  if (pcap.setMinBytes) pcap.setMinBytes(0);
+} catch (err) {
+  console.log('[-] Could not open network interface:', err.message);
 }
 
-// --- State Store ---
-let activeStats = {
-  protocols: { HTTPS: 0, DNS: 0, HTTP: 0, OTHER: 0 },
-  ipUsage: {},       
-  ipToDomain: {},    
-  blockedRules: {},
-  securityAlerts: [],
-  totalPackets: 0
+const sessionData = {
+  //stores live network traffic stats,protocol counts,and firewall status in memory
+  protocolTotals: { HTTPS: 0, DNS: 0, HTTP: 0, OTHER: 0 },
+  clientUsage: {},
+  knownDomains: {},
+  blocklist: {},
+  logs: [],
+  totalFrames: 0
 };
 
-// Common IP-to-Domain Map Overrides for Clean UI Output
-const StaticDomainMap = {
-  '192.168.1.18': 'Your Local Mac (This Device)',
-  '192.168.1.1': 'Home Wi-Fi Router',
-  '192.168.1.255': 'Local Wi-Fi Network Broadcast',
-  '224.0.0.251': 'Apple AirPlay / MDNS Service'
+// maps common local infrastructure and broadcast IPs to their expected values
+const localMap = {
+  '192.168.1.18': 'My Mac (Host)',
+  '192.168.1.1': 'Home Gateway',
+  '192.168.1.255': 'Subnet Broadcast',
+  '224.0.0.251': 'mDNS / AirPlay'
 };
-
-// --- Layer-7 Packet Capture Loop ---
-cap.on('packet', (nbytes) => {
-  activeStats.totalPackets++;
-  let ret = decoders.Ethernet(buffer);
+// packet capture loop that fires every time a raw Ethernet frame is intercepted on interface 'en0
+pcap.on('packet', (size) => {
+  sessionData.totalFrames++;
+  let res = decoders.Ethernet(rawBuf);
   
-  if (ret.info.type === decoders.PROTOCOL.ETHERNET.IPV4) {
-    ret = decoders.IPV4(buffer, ret.offset);
-    const dstIp = ret.info.dstaddr;
-    const protocol = ret.info.protocol;
+  if (res.info.type === decoders.PROTOCOL.ETHERNET.IPV4) {
+    res = decoders.IPV4(rawBuf, res.offset);
+    const destination = res.info.dstaddr;
+    const protoType = res.info.protocol;
 
-    if (!activeStats.ipUsage[dstIp]) {
-      const knownLabel = StaticDomainMap[dstIp] || activeStats.ipToDomain[dstIp] || 'Resolving Host...';
-      activeStats.ipUsage[dstIp] = { bytes: 0, domain: knownLabel };
-      if (!StaticDomainMap[dstIp]) resolveIpDomain(dstIp);
+    if (!sessionData.clientUsage[destination]) {
+      const tag = localMap[destination] || sessionData.knownDomains[destination] || 'Unresolved Host';
+      sessionData.clientUsage[destination] = { bytes: 0, domain: tag };
+      if (!localMap[destination]) resolveHostName(destination);
     }
-    activeStats.ipUsage[dstIp].bytes += nbytes;
-
-    if (protocol === 6) { // TCP
-      const tcp = decoders.TCP(buffer, ret.offset);
-      const payloadOffset = ret.offset + tcp.offset;
-      if (tcp.info.dstport === 443 || tcp.info.srcport === 443) {
-        activeStats.protocols.HTTPS++;
-        parseTlsSni(buffer.slice(payloadOffset, nbytes), dstIp);
-      } else if (tcp.info.dstport === 80 || tcp.info.srcport === 80) {
-        activeStats.protocols.HTTP++;
+    sessionData.clientUsage[destination].bytes += size;
+    //check if Layer-4 protocol is TCP - protocol number 6
+    if (protoType === 6) { // TCP
+      const tcpHeader = decoders.TCP(rawBuf, res.offset);
+      const payloadStart = res.offset + tcpHeader.offset;
+      const port = tcpHeader.info.dstport;
+      const srcPort = tcpHeader.info.srcport;
+      if (port === 443 || srcPort === 443) {
+        sessionData.protocolTotals.HTTPS++;
+        parseSniHeader(rawBuf.slice(payloadStart, size), destination);
+      } else if (port === 80 || srcPort === 80) {
+        sessionData.protocolTotals.HTTP++;
       } else {
-        activeStats.protocols.OTHER++;
+        sessionData.protocolTotals.OTHER++;
       }
-    } else if (protocol === 17) { // UDP
-      const udp = decoders.UDP(buffer, ret.offset);
-      if (udp.info.dstport === 53 || udp.info.srcport === 53) {
-        activeStats.protocols.DNS++;
+    } // check if Layer-4 protocol is UDP - protocol number 17
+    else if (protoType === 17) { // UDP
+      const udpHeader = decoders.UDP(rawBuf, res.offset);
+      if (udpHeader.info.dstport === 53 || udpHeader.info.srcport === 53) {
+        sessionData.protocolTotals.DNS++;
       } else {
-        activeStats.protocols.OTHER++;
+        sessionData.protocolTotals.OTHER++;
       }
     }
   }
 });
-
-async function resolveIpDomain(ip) {
-  if (activeStats.ipToDomain[ip]) return;
-  try {
-    const hostnames = await dns.reverse(ip);
-    if (hostnames && hostnames.length > 0) {
-      let name = hostnames[0];
-      // Clean AWS/Cloud reverse DNS strings into readable labels
-      if (name.includes('amazonaws.com')) name = 'Amazon Web Services (AWS)';
-      if (name.includes('1e100.net') || name.includes('google')) name = 'Google Services / YouTube';
-      if (name.includes('cloudfront')) name = 'Cloudfront CDN';
-      
-      activeStats.ipToDomain[ip] = name;
-      if (activeStats.ipUsage[ip]) activeStats.ipUsage[ip].domain = name;
-    }
-  } catch (err) {
-    activeStats.ipToDomain[ip] = 'Web Server / Cloud Host';
-    if (activeStats.ipUsage[ip]) activeStats.ipUsage[ip].domain = 'Web Server / Cloud Host';
-  }
-}
-
-function parseTlsSni(payload, dstIp) {
-  if (payload.length < 5 || payload[0] !== 0x16) return;
-  const payloadStr = payload.toString('binary');
-  const domainMatch = payloadStr.match(/([a-z0-9|-]+\.)+[a-z]{2,}/i);
+// handles reverse DNS lookups in the background
+// finds the domain name associated with an IP address
+function resolveHostName(addr) {
+  if (sessionData.knownDomains[addr]) return;
   
-  if (domainMatch) {
-    const domain = domainMatch[0];
-    activeStats.ipToDomain[dstIp] = domain;
-    if (activeStats.ipUsage[dstIp]) activeStats.ipUsage[dstIp].domain = domain;
+  dns.reverse(addr).then(ptrs => {
+    if (ptrs && ptrs.length > 0) {
+      let hostLabel = ptrs[0];
+      if (hostLabel.includes('amazonaws.com')) hostLabel = 'AWS Infrastructure';
+      if (hostLabel.includes('1e100.net') || hostLabel.includes('google')) hostLabel = 'Google Cloud / YT';
+      if (hostLabel.includes('cloudfront')) hostLabel = 'Cloudfront CDN';      
+      sessionData.knownDomains[addr] = hostLabel;
+      if (sessionData.clientUsage[addr]) sessionData.clientUsage[addr].domain = hostLabel;
+    }
+  }).catch(() => {
+    sessionData.knownDomains[addr] = 'Remote Server';
+    if (sessionData.clientUsage[addr]) sessionData.clientUsage[addr].domain = 'Remote Server';
+  });
+}
+//extracts the hostname from the TLS client hello packet
+function parseSniHeader(data, targetIp) {
+  if (data.length < 5 || data[0] !== 22) return; // 0x16 Handshake
+  const str = data.toString('binary');
+  const found = str.match(/([a-z0-9|-]+\.)+[a-z]{2,}/i);
+  
+  if (found) {
+    const hostname = found[0];
+    sessionData.knownDomains[targetIp] = hostname;
+    if (sessionData.clientUsage[targetIp]) sessionData.clientUsage[targetIp].domain = hostname;
   }
 }
-
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+function formatDataVolume(totalBytes) { //converts byte values into readable units like KB, MB, and GB
+  if (!totalBytes) return '0 B';
+  const labels = ['B', 'KB', 'MB', 'GB'];
+  const idx = Math.floor(Math.log(totalBytes) / Math.log(1024));
+  return (totalBytes / Math.pow(1024, idx)).toFixed(1) + ' ' + labels[idx];
 }
-
-// Broadcast loop
+//collects packet stats every second and sends them to the React client through Websockets
 setInterval(() => {
-  const sortedIps = Object.entries(activeStats.ipUsage)
-    .map(([ip, data]) => ({
+  const sortedEndpoints = Object.entries(sessionData.clientUsage)
+    .map(([ip, details]) => ({
       ip,
-      domain: data.domain || StaticDomainMap[ip] || activeStats.ipToDomain[ip] || 'Web Host',
-      bytes: data.bytes,
-      formattedSize: formatBytes(data.bytes)
+      domain: details.domain || localMap[ip] || sessionData.knownDomains[ip] || 'Unknown',
+      bytes: details.bytes,
+      formattedSize: formatDataVolume(details.bytes)
     }))
-    .sort((a, b) => b.bytes - a.bytes)
+    .sort((x, y) => y.bytes - x.bytes)
     .slice(0, 7);
 
-  const blockedList = Object.entries(activeStats.blockedRules).map(([target, ips]) => ({
-    target,
+  const activeRules = Object.entries(sessionData.blocklist).map(([site, ips]) => ({
+    target: site,
     ipCount: ips.length
   }));
-
   io.emit('telemetry', {
-    protocols: activeStats.protocols,
-    topIps: sortedIps,
-    blockedDomains: blockedList,
-    alerts: activeStats.securityAlerts,
-    totalPackets: activeStats.totalPackets
+    protocols: sessionData.protocolTotals,
+    topIps: sortedEndpoints,
+    blockedDomains: activeRules,
+    alerts: sessionData.logs,
+    totalPackets: sessionData.totalFrames
   });
 }, 1000);
-
-// --- REAL WORKING BLOCKING ENGINE ---
+// POST /api/block-domain
+// Blocking -> Takes a domain from the request and applies the firewall block.
 app.post('/api/block-domain', async (req, res) => {
-  let { target } = req.body;
-  if (!target) return res.status(400).json({ success: false });
+  let domain = req.body.target;
+  if (!domain) return res.status(400).json({ error: 'No domain provided' });
 
-  // Clean input (remove https:// or www.)
-  target = target.replace(/^(?:https?:\/\/)?(?:www\.)?/i, "").split('/')[0];
+  domain = domain.replace(/^(?:https?:\/\/)?(?:www\.)?/i, '').split('/')[0];
+  let ips = [];
+  let queryTargets = [domain, `www.${domain}`];
 
-  let ipsToBlock = [];
-  let targetsToResolve = [target, `www.${target}`];
-
-  if (target.includes('youtube')) {
-    targetsToResolve.push('googlevideo.com', 'ytimg.com', 'youtube-nocookie.com');
+  if (domain.includes('youtube')) {
+    queryTargets.push('googlevideo.com', 'ytimg.com', 'youtube-nocookie.com');
   }
 
-  for (let t of targetsToResolve) {
+  for (const t of queryTargets) {
     try {
-      const resolved4 = await dns.resolve4(t);
-      ipsToBlock.push(...resolved4);
-    } catch (e) {}
+      const v4 = await dns.resolve4(t);
+      ips.push(...v4);
+    } catch (_) {}
     try {
-      const resolved6 = await dns.resolve6(t);
-      ipsToBlock.push(...resolved6);
-    } catch (e) {}
+      const v6 = await dns.resolve6(t);
+      ips.push(...v6);
+    } catch (_) {}
   }
-
-  if (ipsToBlock.length === 0) ipsToBlock = [target];
-
-  // 1. Enforce Firewall Drops
-  ipsToBlock.forEach(ip => {
+  if (ips.length === 0) ips = [domain];
+  //. Inject pfctl drop rules into dedicated anchor
+  ips.forEach(ip => {
     exec(`echo 'block drop out proto { tcp, udp } to ${ip}' | sudo pfctl -a dpi_rules -f -`);
   });
-
-  // 2. Kill Active Socket Connections immediately so browsers stop streaming
-  exec(`sudo pfctl -k 0.0.0.0/0 -k 0.0.0.0/0`);
-
-  // 3. Hosts File Sinkhole for instant browser redirection block
-  const hostsRule = `127.0.0.1 ${target} www.${target}`;
-  exec(`echo "${hostsRule}" | sudo tee -a /etc/hosts`);
-
-  activeStats.blockedRules[target] = ipsToBlock;
-  activeStats.securityAlerts.unshift({
+  // terminate active socket states so streams cut immediately
+  exec('sudo pfctl -k 0.0.0.0/0 -k 0.0.0.0/0');
+  exec(`echo "127.0.0.1 ${domain} www.${domain}" | sudo tee -a /etc/hosts`);
+  sessionData.blocklist[domain] = ips;
+  sessionData.logs.unshift({
     id: Date.now(),
     timestamp: new Date().toLocaleTimeString(),
-    type: 'FIREWALL_RULE_ENFORCED',
-    message: `Kernel Block Enforced for "${target}" (${ipsToBlock.length} IP endpoints dropped)`
+    type: 'ENFORCED',
+    message: `Enforced kernel block for "${domain}" (${ips.length} endpoints dropped)`
   });
-
-  res.json({ success: true, target, ipsToBlock });
+  res.json({ success: true, domain, resolvedEndpoints: ips });
 });
-
-// --- UNBLOCK ENGINE ---
+// POST /api/unblock-domain
+// Unblocking -> Removes the block for a previously blocked domain.
 app.post('/api/unblock-domain', (req, res) => {
-  let { target } = req.body;
-  target = target.replace(/^(?:https?:\/\/)?(?:www\.)?/i, "").split('/')[0];
-
-  if (activeStats.blockedRules[target]) {
-    delete activeStats.blockedRules[target];
+  let domain = req.body.target;
+  domain = domain.replace(/^(?:https?:\/\/)?(?:www\.)?/i, '').split('/')[0];
+  if (sessionData.blocklist[domain]) {
+    delete sessionData.blocklist[domain];
   }
-
-  // 1. Clear pfctl firewall anchor
-  exec(`sudo pfctl -a dpi_rules -F all`);
-
-  // 2. Remove rule from /etc/hosts
-  exec(`sudo sed -i '' '/${target}/d' /etc/hosts`);
-
-  activeStats.securityAlerts.unshift({
+  exec('sudo pfctl -a dpi_rules -F all');
+  exec(`sudo sed -i '' '/${domain}/d' /etc/hosts`);
+  sessionData.logs.unshift({
     id: Date.now(),
     timestamp: new Date().toLocaleTimeString(),
-    type: 'FIREWALL_RULE_CLEARED',
-    message: `Flushed firewall & unblocked domain: "${target}"`
+    type: 'CLEARED',
+    message: `Cleared firewall rule for "${domain}"`
   });
-
-  res.json({ success: true, message: `Unblocked ${target}` });
+  res.json({ success: true });
 });
-
-server.listen(5001, () => console.log('DPI Engine listening on port 5001'));
+srv.listen(5001, () => console.log('[+] Traffic inspector live on port 5001'));

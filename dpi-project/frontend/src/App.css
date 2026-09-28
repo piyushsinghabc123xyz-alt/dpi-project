@@ -1,220 +1,213 @@
-/* Header Section */
-.app-container {
-  padding: 30px;
+.wrapper {
+  padding: 20px;
+  background-color: #008c8a;
+  color: #e2e8f0;
   min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-.dashboard-header {
+.header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 25px;
-  border-bottom: 1px solid var(--border-color);
-  padding-bottom: 15px;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #1e293b;
 }
 
-.dashboard-title {
-  font-size: 26px;
-  font-weight: 700;
+.header h2 {
+  margin: 0;
+  font-size: 22px;
 }
 
-.dashboard-subtitle {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin-top: 5px;
-}
-
-.status-badge {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-color);
-  padding: 8px 14px;
-  border-radius: 20px;
+.subtext {
+  color: #64748b;
   font-size: 13px;
+}
+
+.status {
+  background: #1e293b;
+  padding: 6px 12px;
+  border-radius: 16px;
+  font-size: 12px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
-.pulse-dot {
-  width: 8px;
-  height: 8px;
-  background-color: var(--accent-green);
+.dot {
+  width: 6px;
+  height: 6px;
+  background: #22c55e;
   border-radius: 50%;
-  display: inline-block;
 }
 
-/* Dashboard Grid Layout */
-.dashboard-grid {
+.grid {
   display: flex;
-  gap: 20px;
+  gap: 16px;
   flex-wrap: wrap;
 }
 
-.dashboard-card {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 20px;
+.box {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 16px;
   flex: 1;
-  min-width: 280px;
+  min-width: 260px;
 }
 
-.dashboard-card.large {
+.box.wide {
   flex: 2;
-  min-width: 450px;
+  min-width: 400px;
 }
 
-.card-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 15px;
+.box h4 {
+  margin: 0 0 12px 0;
+  font-size: 15px;
+  color: #f1f5f9;
 }
 
-/* Pie Chart & Percentage Breakdown */
-.chart-wrapper {
-  width: 180px;
-  margin: 0 auto 15px auto;
+.chart-container {
+  width: 150px;
+  margin: 0 auto 12px auto;
 }
 
-.percentage-box {
-  border-top: 1px solid var(--border-color);
-  padding-top: 12px;
-  margin-top: 10px;
+.percentages {
+  border-top: 1px solid #334155;
+  padding-top: 10px;
+  font-size: 12px;
 }
 
-.percent-row {
+.percentages div {
   display: flex;
   justify-content: space-between;
-  font-size: 13px;
-  margin-bottom: 6px;
-  color: #cbd5e1;
+  margin-bottom: 4px;
 }
 
-.dot-https { color: #3b82f6; }
-.dot-dns { color: #ef4444; }
-.dot-http { color: #f59e0b; }
-.dot-other { color: #10b981; }
+.p-https { color: #2563eb; }
+.p-dns { color: #dc2626; }
+.p-http { color: #d97706; }
+.p-other { color: #059669; }
 
-/* Bandwidth Table */
-.data-table {
+.traffic-table {
   width: 100%;
   border-collapse: collapse;
+  font-size: 13px;
+}
+
+.traffic-table th {
   text-align: left;
+  border-bottom: 1px solid #334155;
+  color: #64748b;
+  padding: 8px 4px;
 }
 
-.data-table th {
-  border-bottom: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 13px;
-  padding: 10px 8px;
+.traffic-table td {
+  padding: 10px 4px;
+  border-bottom: 1px solid #0f172a;
 }
 
-.data-table td {
-  border-bottom: 1px solid var(--border-color);
-  font-size: 14px;
-  padding: 12px 8px;
-}
-
-.domain-name {
+.host-col {
   color: #38bdf8;
-  font-weight: 600;
 }
 
-/* Form & Inputs */
-.card-description {
-  color: var(--text-secondary);
-  font-size: 13px;
-  margin-bottom: 15px;
-}
-
-.block-input {
+.main-input {
   width: 100%;
-  padding: 10px;
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  color: var(--text-primary);
-  margin-bottom: 12px;
+  padding: 8px;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  color: #fff;
+  margin-bottom: 8px;
+  box-sizing: border-box;
 }
 
-.btn-primary {
+.btn-danger {
   width: 100%;
-  padding: 10px;
-  background-color: var(--accent-red);
+  padding: 8px;
+  background: #dc2626;
   color: #fff;
   border: none;
-  border-radius: 6px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.btn-quick-block {
-  padding: 4px 8px;
-  background-color: #334155;
-  color: #38bdf8;
-  border: 1px solid #0284c7;
   border-radius: 4px;
-  font-size: 12px;
-  font-weight: 600;
   cursor: pointer;
+  font-weight: 500;
 }
 
-.blocked-badge {
-  padding: 8px 10px;
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  font-size: 12px;
-  color: #f87171;
-  margin-bottom: 6px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.btn-unblock {
+.btn-block-sm {
   padding: 3px 8px;
-  background-color: #059669;
-  color: #fff;
+  background: #334155;
+  color: #38bdf8;
   border: none;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
+  border-radius: 3px;
   cursor: pointer;
+  font-size: 11px;
 }
 
-/* Live Security Feed */
-.alert-container {
-  max-height: 150px;
-  overflow-y: auto;
+.blocked-section {
+  margin-top: 16px;
 }
 
-.alert-row {
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border-color);
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.alert-timestamp {
+.blocked-section h5 {
+  margin: 0 0 8px 0;
+  font-size: 12px;
   color: #64748b;
 }
 
-.alert-tag {
-  padding: 2px 8px;
+.blocked-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #0f172a;
+  padding: 6px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.btn-success {
+  background: #059669;
+  color: #fff;
+  border: none;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.logs-box {
+  margin-top: 16px;
+}
+
+.log-list {
+  max-height: 120px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.log-item {
+  padding: 4px 0;
+  border-bottom: 1px solid #334155;
+  display: flex;
+  gap: 8px;
+}
+
+.log-time {
+  color: #64748b;
+}
+
+.log-tag {
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-size: 10px;
   font-weight: 600;
 }
 
-.alert-tag.enforced {
-  background-color: #065f46;
-  color: #34d399;
-}
+.log-tag.red { background: #7f1d1d; color: #f87171; }
+.log-tag.green { background: #064e3b; color: #34d399; }
 
-.alert-tag.cleared {
-  background-color: #991b1b;
-  color: #f87171;
+.empty-text {
+  color: #64748b;
+  font-size: 12px;
+  margin: 0;
 }
