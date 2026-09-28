@@ -74,14 +74,51 @@ pcap.on('packet', (size) => {
     } // check if Layer-4 protocol is UDP - protocol number 17
     else if (protoType === 17) { // UDP
       const udpHeader = decoders.UDP(rawBuf, res.offset);
-      if (udpHeader.info.dstport === 53 || udpHeader.info.srcport === 53) {
+      const payloadStart = res.offset + udpHeader.offset;
+      const port = udpHeader.info.dstport;
+      const srcPort = udpHeader.info.srcport;
+
+      if (port === 53 || srcPort === 53) {
         sessionData.protocolTotals.DNS++;
+        parseDnsPayload(rawBuf.slice(payloadStart, size));
+      } else if (port === 443 || srcPort === 443) { // QUIC Traffic (YouTube/HTTP-3)
+        sessionData.protocolTotals.HTTPS++;
+        parseSniHeader(rawBuf.slice(payloadStart, size), destination);
       } else {
         sessionData.protocolTotals.OTHER++;
       }
     }
   }
 });
+
+// Intercepts plaintext DNS queries/responses to map domain names to IPs instantly
+function parseDnsPayload(buf) {
+  if (buf.length < 12) return;
+  const str = buf.toString('binary');
+  const matches = str.match(/([a-zA-Z0-9-]+\.)+(com|org|net|io|co|in|tv|app|dev|me|edu|gov|xyz)/gi);
+  if (matches && matches.length > 0) {
+    let domain = matches[0].toLowerCase();
+    
+    if (domain.includes('googlevideo') || domain.includes('ytimg') || domain.includes('youtube')) {
+      domain = 'youtube.com';
+    } else {
+      const parts = domain.split('.').filter(Boolean);
+      if (parts.length >= 2) {
+        domain = parts.slice(-2).join('.');
+      }
+    }
+
+    dns.resolve4(domain).then(ips => {
+      ips.forEach(ip => {
+        sessionData.knownDomains[ip] = domain;
+        if (sessionData.clientUsage[ip]) {
+          sessionData.clientUsage[ip].domain = domain;
+        }
+      });
+    }).catch(() => {});
+  }
+}
+
 // handles reverse DNS lookups in the background
 // finds the domain name associated with an IP address
 function resolveHostName(addr) {
@@ -90,35 +127,64 @@ function resolveHostName(addr) {
   dns.reverse(addr).then(ptrs => {
     if (ptrs && ptrs.length > 0) {
       let hostLabel = ptrs[0];
-      if (hostLabel.includes('amazonaws.com')) hostLabel = 'AWS Infrastructure';
-      if (hostLabel.includes('1e100.net') || hostLabel.includes('google')) hostLabel = 'Google Cloud / YT';
-      if (hostLabel.includes('cloudfront')) hostLabel = 'Cloudfront CDN';      
+      const parts = hostLabel.split('.').filter(Boolean);
+      if (parts.length >= 2) {
+        const rootDomain = parts.slice(-2).join('.').toLowerCase();
+        if (rootDomain.includes('amazonaws.com')) hostLabel = 'AWS Infrastructure';
+        else if (rootDomain.includes('1e100.net') || rootDomain.includes('googlevideo.com')) hostLabel = 'youtube.com';
+        else if (rootDomain.includes('cloudfront.net')) hostLabel = 'Cloudfront CDN';
+        else if (rootDomain.includes('akamaitechnologies.com')) hostLabel = 'Akamai CDN';
+        else hostLabel = rootDomain;
+      }
+      
       sessionData.knownDomains[addr] = hostLabel;
       if (sessionData.clientUsage[addr]) sessionData.clientUsage[addr].domain = hostLabel;
     }
   }).catch(() => {
-    sessionData.knownDomains[addr] = 'Remote Server';
-    if (sessionData.clientUsage[addr]) sessionData.clientUsage[addr].domain = 'Remote Server';
+    if (!sessionData.knownDomains[addr]) {
+      sessionData.knownDomains[addr] = 'Cloud Host';
+      if (sessionData.clientUsage[addr]) sessionData.clientUsage[addr].domain = 'Cloud Host';
+    }
   });
 }
+
 //extracts the hostname from the TLS client hello packet
 function parseSniHeader(data, targetIp) {
-  if (data.length < 5 || data[0] !== 22) return; // 0x16 Handshake
-  const str = data.toString('binary');
-  const found = str.match(/([a-z0-9|-]+\.)+[a-z]{2,}/i);
+  if (data.length < 5) return;
+
+  const payloadStr = data.toString('binary');
+  const matches = payloadStr.match(/(?:[a-zA-Z0-9-]+\.)+(?:com|org|net|io|co|in|tv|app|dev|me|edu|gov|xyz|info)/gi);
   
-  if (found) {
-    const hostname = found[0];
-    sessionData.knownDomains[targetIp] = hostname;
-    if (sessionData.clientUsage[targetIp]) sessionData.clientUsage[targetIp].domain = hostname;
+  if (matches && matches.length > 0) {
+    let hostname = matches[0].toLowerCase().replace(/[^a-z0-9.-]/g, '');
+    
+    if (hostname.includes('googlevideo') || hostname.includes('ytimg') || hostname.includes('youtube')) {
+      hostname = 'youtube.com';
+    } else if (hostname.includes('github')) {
+      hostname = 'github.com';
+    } else {
+      const parts = hostname.split('.').filter(Boolean);
+      if (parts.length >= 2) {
+        hostname = parts.slice(-2).join('.');
+      }
+    }
+    
+    if (hostname && hostname.includes('.')) {
+      sessionData.knownDomains[targetIp] = hostname;
+      if (sessionData.clientUsage[targetIp]) {
+        sessionData.clientUsage[targetIp].domain = hostname;
+      }
+    }
   }
 }
+
 function formatDataVolume(totalBytes) { //converts byte values into readable units like KB, MB, and GB
   if (!totalBytes) return '0 B';
   const labels = ['B', 'KB', 'MB', 'GB'];
   const idx = Math.floor(Math.log(totalBytes) / Math.log(1024));
   return (totalBytes / Math.pow(1024, idx)).toFixed(1) + ' ' + labels[idx];
 }
+
 //collects packet stats every second and sends them to the React client through Websockets
 setInterval(() => {
   const sortedEndpoints = Object.entries(sessionData.clientUsage)
@@ -143,6 +209,7 @@ setInterval(() => {
     totalPackets: sessionData.totalFrames
   });
 }, 1000);
+
 // POST /api/block-domain
 // Blocking -> Takes a domain from the request and applies the firewall block.
 app.post('/api/block-domain', async (req, res) => {
@@ -154,7 +221,7 @@ app.post('/api/block-domain', async (req, res) => {
   let queryTargets = [domain, `www.${domain}`];
 
   if (domain.includes('youtube')) {
-    queryTargets.push('googlevideo.com', 'ytimg.com', 'youtube-nocookie.com');
+    queryTargets.push('googlevideo.com', 'ytimg.com', 'youtube-nocookie.com', 'm.youtube.com', 'i.ytimg.com', 'gvt1.com');
   }
 
   for (const t of queryTargets) {
@@ -167,14 +234,23 @@ app.post('/api/block-domain', async (req, res) => {
       ips.push(...v6);
     } catch (_) {}
   }
+
   if (ips.length === 0) ips = [domain];
-  //. Inject pfctl drop rules into dedicated anchor
+
+  // Inject pfctl drop rules into dedicated anchor
   ips.forEach(ip => {
     exec(`echo 'block drop out proto { tcp, udp } to ${ip}' | sudo pfctl -a dpi_rules -f -`);
   });
-  // terminate active socket states so streams cut immediately
+
+  // Enable pf firewall and flush TCP/UDP active states
+  exec('sudo pfctl -e');
   exec('sudo pfctl -k 0.0.0.0/0 -k 0.0.0.0/0');
-  exec(`echo "127.0.0.1 ${domain} www.${domain}" | sudo tee -a /etc/hosts`);
+  
+  // Sinkhole domain variants in /etc/hosts
+  if (!domain.match(/^[0-9.]+$\vert{}^[0-9a-fA-F:]+$/)) {
+    exec(`echo "127.0.0.1 ${domain} www.${domain} m.${domain}" | sudo tee -a /etc/hosts`);
+  }
+
   sessionData.blocklist[domain] = ips;
   sessionData.logs.unshift({
     id: Date.now(),
@@ -184,6 +260,7 @@ app.post('/api/block-domain', async (req, res) => {
   });
   res.json({ success: true, domain, resolvedEndpoints: ips });
 });
+
 // POST /api/unblock-domain
 // Unblocking -> Removes the block for a previously blocked domain.
 app.post('/api/unblock-domain', (req, res) => {
@@ -202,4 +279,5 @@ app.post('/api/unblock-domain', (req, res) => {
   });
   res.json({ success: true });
 });
+
 srv.listen(5001, () => console.log('[+] Traffic inspector live on port 5001'));

@@ -49,7 +49,7 @@ function App() {
         metrics.protocols.HTTP || 0,
         metrics.protocols.OTHER || 0
       ],
-      backgroundColor: ['#2563eb', '#dc2626', '#d97706', '#059669'],
+      backgroundColor: ['#93C0A4', '#8E9B90', '#606D5D', '#B6C4A2'],
       borderWidth: 0
     }],
   };
@@ -70,7 +70,14 @@ function App() {
         <div className="panel-card">
           <h3>Protocol Distribution</h3>
           <div className="doughnut-holder">
-            <Doughnut data={pieData} options={{ plugins: { legend: { display: false } } }} />
+            <Doughnut 
+              data={pieData} 
+              options={{ 
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } } 
+              }} 
+            />
           </div>
           <div className="breakdown-list">
             <div className="stat-item"><span className="legend-marker c-https">■</span> HTTPS: <strong>{getPercentage(metrics.protocols.HTTPS)}%</strong></div>
